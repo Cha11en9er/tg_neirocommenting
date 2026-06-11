@@ -147,6 +147,10 @@ activemq-data/
 # SageMath parsed files
 *.sage.py
 
+# Telegram session and runtime state
+*.session
+comment_cooldowns.json
+
 # Environments
 .env
 .envrc
