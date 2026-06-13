@@ -1,0 +1,26 @@
+{
+  "channels": {
+    "1": {
+      "channel_link": "https://t.me/neyrocommentimpopolnoy",
+      "group_id": 0,
+      "enabled": true,
+      "freeze_days": 7,
+      "post_min_age_minutes": 30,
+      "post_activity_window_minutes": 30,
+      "min_comments": 3,
+      "min_subscribers": 20000,
+      "posts_scan_limit": 30
+    },
+    "2": {
+      "channel_link": "https://t.me/test_neirocoment",
+      "group_id": 0,
+      "enabled": true,
+      "freeze_days": 7,
+      "post_min_age_minutes": 30,
+      "post_activity_window_minutes": 30,
+      "min_comments": 3,
+      "min_subscribers": 20000,
+      "posts_scan_limit": 30
+    }
+  }
+}
