@@ -86,4 +86,4 @@ https://t.me/username - . -3511597340
 
 ## Деплой на сервер
 
-Развёртывание тестового бота на Ubuntu (git pull, `.env`, сессия, systemd): [docs/deploy-test-ubuntu.md](docs/deploy-test-ubuntu.md).
+Развёртывание на Ubuntu (venv в папке проекта, Docker для test/prod, systemd): [docs/deploy-test-ubuntu.md](docs/deploy-test-ubuntu.md).

@@ -1,0 +1,13 @@
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+.git/
+.gitignore
+.env
+.env.*
+*.session
+prod/neuro_state.json
+test/neuro_state_test.json
+docs/
+profile1/

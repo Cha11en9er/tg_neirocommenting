@@ -1,8 +1,22 @@
-# Развёртывание тестового бота на Ubuntu
+# Развёртывание на Ubuntu (test / prod)
 
-Инструкция для сервера: клон репозитория, секреты, сессия Telegram-аккаунта и автозапуск через systemd.
+Инструкция для сервера: клон репозитория, `.env`, сессия Telegram, запуск через **venv** или **Docker**.
 
-> **Важно:** prod и test используют **одну** сессию (`neuro_session.session`). Не запускайте оба бота одновременно — ни на сервере, ни на ПК вместе с сервером.
+> **Важно:** prod и test используют **одну** сессию (`neuro_session.session`). Не запускайте оба бота одновременно — ни `neuro-test` + `neuro-prod`, ни сервер + ПК с той же сессией.
+
+**Содержание**
+
+1. [Что понадобится](#что-понадобится)
+2. [Подготовка сервера](#1-подготовка-сервера)
+3. [Клонирование](#2-клонирование-репозитория)
+4. [venv в папке проекта](#3-venv-в-папке-проекта)
+5. [Секреты и вход в Telegram](#4-секреты-и-вход-в-telegram)
+6. [Запуск через venv](#5-запуск-через-venv)
+7. [Запуск через Docker](#6-запуск-через-docker)
+8. [Автозапуск systemd (без Docker)](#7-автозапуск-systemd-без-docker)
+9. [Обновление](#8-обновление-после-git-pull)
+10. [Частые проблемы](#9-частые-проблемы)
+11. [Чеклист](#10-чеклист)
 
 ---
 
@@ -11,13 +25,17 @@
 | Что | Где лежит | В git? |
 |-----|-----------|--------|
 | Код | репозиторий | да |
-| `.env` | корень проекта | **нет** — копируете с ПК |
-| `neuro_session.session` | корень проекта | **нет** — копируете с ПК |
-| `neuro_session.session-journal` | корень (если есть) | **нет** — копируете вместе с session |
-| `test/channels.json` | список каналов | да (можно править на сервере) |
-| `test/neuro_state_test.json` | состояние (фризы, обработанные посты) | **нет** — создаётся сам или копируется |
+| `.env` | корень проекта | **нет** — создаёте на сервере или копируете с ПК |
+| `neuro_session.session` | корень проекта | **нет** — создаётся при первом входе бота **или** копируется с ПК |
+| `venv/` | корень проекта | **нет** — создаёте локально (`python -m venv venv`) |
+| `prod/channels.json` | каналы prod | да |
+| `test/channels.json` | каналы test | да |
+| `prod/neuro_state.json` | состояние prod | **нет** — создаётся сам |
+| `test/neuro_state_test.json` | состояние test | **нет** — создаётся сам |
 
-В `.env` должны быть:
+> **Про сессию:** `neuro_session.session` — это **не** папка `data`/`tdata` из Telegram Desktop. Это локальная база Telethon: бот создаёт её при первом запуске, когда вы вводите код из приложения Telegram.
+
+В `.env`:
 
 ```env
 API_ID=...
@@ -26,12 +44,14 @@ PHONE=+7...
 OPENROUTER_API_KEY=sk-or-v1-...
 ```
 
-Получить `API_ID` / `API_HASH`: https://my.telegram.org/apps  
-Ключ OpenRouter: https://openrouter.ai/keys
+- `API_ID` / `API_HASH`: https://my.telegram.org/apps  
+- OpenRouter: https://openrouter.ai/keys
 
 ---
 
 ## 1. Подготовка сервера
+
+### Для venv
 
 ```bash
 sudo apt update
@@ -39,14 +59,32 @@ sudo apt install -y git python3 python3-venv python3-pip
 python3 --version   # нужен Python 3.10+
 ```
 
-Создайте пользователя для бота (рекомендуется, не root):
+### Для Docker (можно вместо python3-venv)
+
+```bash
+sudo apt update
+sudo apt install -y git ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo "${VERSION_CODENAME}") stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+sudo usermod -aG docker $USER
+# перелогиньтесь, чтобы группа docker применилась
+```
+
+Отдельный пользователь (рекомендуется):
 
 ```bash
 sudo adduser --disabled-password neurobot
+sudo usermod -aG docker neurobot   # если используете Docker
 sudo su - neurobot
 ```
-
-Дальше команды — от имени этого пользователя (или своего, если уже не root).
 
 ---
 
@@ -58,7 +96,7 @@ git clone https://github.com/Cha11en9er/tg_neirocommenting.git
 cd tg_neirocommenting
 ```
 
-Обновление в будущем:
+Обновление:
 
 ```bash
 cd ~/tg_neirocommenting
@@ -67,78 +105,80 @@ git pull
 
 ---
 
-## 3. Виртуальное окружение и зависимости
+## 3. venv в папке проекта
+
+Виртуальное окружение создаётся **внутри репозитория** — папка `venv/` в корне (не в системный Python):
 
 ```bash
 cd ~/tg_neirocommenting
 python3 -m venv venv
+```
+
+Активация (каждый новый терминал):
+
+```bash
+cd ~/tg_neirocommenting
 source venv/bin/activate
+```
+
+В начале строки появится `(venv)`. Установка зависимостей:
+
+```bash
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-После `source venv/bin/activate` в начале строки появится `(venv)`.
+Деактивация: `deactivate`.
+
+Папка `venv/` в `.gitignore` — в git не попадает. На сервере она живёт только локально рядом с кодом:
+
+```
+~/tg_neirocommenting/
+├── venv/              ← виртуальное окружение
+├── .env
+├── neuro_session.session
+├── prod/
+└── test/
+```
+
+> **Docker:** если запускаете только через Docker, `venv/` на хосте **не обязателен** — зависимости ставятся внутри образа. Но venv удобен для первого интерактивного входа без Docker.
 
 ---
 
-## 4. Перенос `.env` и сессии Telegram с ПК
+## 4. Секреты и вход в Telegram
 
-Файлы **не в git**. Скопируйте с Windows-машины на сервер через `scp` (выполнять **на ПК**, в PowerShell или Git Bash).
+Создайте `.env` в корне (скопируйте с ПК или `cp .env.example .env` и заполните):
 
-Подставьте свой логин и IP сервера:
+```bash
+cd ~/tg_neirocommenting
+nano .env
+chmod 600 .env
+```
+
+### Первый вход (код с телефона)
+
+Запустите бота **вручную** в терминале (venv или Docker — см. ниже). Telethon попросит код из Telegram → введите в терминал → появится `neuro_session.session` в корне проекта.
+
+Папку `data` / `tdata` с Telegram Desktop **переносить не нужно**.
+
+### Уже входили на ПК
+
+Скопируйте готовую сессию (бот на ПК должен быть **остановлен**):
 
 ```powershell
-# из папки, где лежат .env и neuro_session.session (корень проекта на ПК)
 scp .env neurobot@YOUR_SERVER_IP:~/tg_neirocommenting/
 scp neuro_session.session neurobot@YOUR_SERVER_IP:~/tg_neirocommenting/
 ```
 
-Если рядом с session есть journal-файл — тоже перенесите:
-
-```powershell
-scp neuro_session.session-journal neurobot@YOUR_SERVER_IP:~/tg_neirocommenting/
-```
-
-На сервере проверьте права (чтобы другие пользователи не читали секреты):
-
-```bash
-cd ~/tg_neirocommenting
-chmod 600 .env neuro_session.session
-chmod 600 neuro_session.session-journal 2>/dev/null || true
-ls -la .env neuro_session.session*
-```
-
-### Если сессии ещё нет
-
-Один раз авторизуйтесь **на ПК**, запустите тестовый бот локально — Telethon создаст `neuro_session.session`. Потом скопируйте файл на сервер.
-
-На сервере без готовой сессии первый запуск попросит код из Telegram; для headless-сервера это неудобно — проще всегда переносить уже авторизованную сессию.
-
-### Опционально: состояние теста
-
-Чтобы не потерять baseline обработанных постов и фризы:
-
-```powershell
-scp test/neuro_state_test.json neurobot@YOUR_SERVER_IP:~/tg_neirocommenting/test/
-```
-
-Если файла нет — бот создаст `test/neuro_state_test.json` при первом запуске.
+`neuro_session.session-journal` переносить **не обязательно**.
 
 ---
 
-## 5. Каналы и админ
+## 5. Запуск через venv
 
-Список каналов: `test/channels.json` (уже в репозитории). При необходимости отредактируйте на сервере или добавляйте каналы командой в личку боту:
+### Тестовый бот
 
-```
-https://t.me/username - . -GROUP_ID
-```
-
-Админ-команды (`статус`, `настройки`, `старт отправки` и т.д.) принимаются только от ID из `test/neuro_config.py` → `ADMIN_USER_IDS`. Свой Telegram ID можно узнать у [@userinfobot](https://t.me/userinfobot).
-
----
-
-## 6. Пробный запуск
+Интервалы 5 мин, разбор LLM — в комментарий под постом:
 
 ```bash
 cd ~/tg_neirocommenting
@@ -146,33 +186,118 @@ source venv/bin/activate
 python test/neuro_commenter_test.py
 ```
 
-Ожидаемый вывод:
+### Боевой бот
 
+Заморозки, фильтры, мониторинг каждые 30 мин:
+
+```bash
+cd ~/tg_neirocommenting
+source venv/bin/activate
+python prod/neuro_commenter.py
 ```
-🧪 Тестовый режим (интервалы 5 мин, config: test/neuro_config.py)
-🧪 Разбор постов — в комментарии под постом, не в консоль
-✅ Нейрокомментер запущен! Аккаунт: @...
-```
 
-Остановка: `Ctrl+C`.
+Остановка: `Ctrl+C`. Запускайте **только один** из двух.
 
-Поведение тестового бота:
+### Каналы и админ
 
-- тик мониторинга каждые **5 минут**;
-- разбор LLM уходит **в комментарий под постом** (в т.ч. при 0 комментариев);
-- после комментария — заморозка канала на 5 минут.
+- Каналы: `test/channels.json` или `prod/channels.json`
+- Добавление в личку боту: `https://t.me/username - . -GROUP_ID`
+- Админ-команды — только от ID из `ADMIN_USER_IDS` в соответствующем `neuro_config.py`
 
 ---
 
-## 7. Автозапуск через systemd
+## 6. Запуск через Docker
 
-Создайте unit-файл (от root или через `sudo`):
+В репозитории есть `Dockerfile` и `docker-compose.yml` с двумя сервисами:
+
+| Сервис | Команда внутри контейнера |
+|--------|---------------------------|
+| `neuro-test` | `python test/neuro_commenter_test.py` |
+| `neuro-prod` | `python prod/neuro_commenter.py` |
+
+Код и runtime-файлы (`.env`, session, state) монтируются с хоста (`volumes: .:/app`), поэтому сессия и состояние сохраняются между перезапусками.
+
+### Сборка
+
+```bash
+cd ~/tg_neirocommenting
+docker compose build
+```
+
+### Первый вход (интерактивно, с кодом из Telegram)
+
+**Тест:**
+
+```bash
+docker compose run --rm -it neuro-test
+```
+
+**Prod:**
+
+```bash
+docker compose run --rm -it neuro-prod
+```
+
+Введите код → убедитесь, что `neuro_session.session` появился в корне проекта на хосте → `Ctrl+C`.
+
+### Фоновый запуск
+
+**Только тест:**
+
+```bash
+docker compose up -d neuro-test
+```
+
+**Только prod:**
+
+```bash
+docker compose up -d neuro-prod
+```
+
+Логи:
+
+```bash
+docker compose logs -f neuro-test
+docker compose logs -f neuro-prod
+```
+
+Остановка:
+
+```bash
+docker compose stop neuro-test
+docker compose stop neuro-prod
+```
+
+Перезапуск после изменений кода:
+
+```bash
+docker compose build
+docker compose up -d neuro-test    # или neuro-prod
+```
+
+### Docker: что где лежит
+
+```
+~/tg_neirocommenting/          ← монтируется в /app внутри контейнера
+├── .env                       ← env_file для compose
+├── neuro_session.session      ← общая сессия
+├── prod/neuro_state.json      ← состояние prod (создаётся сам)
+├── test/neuro_state_test.json ← состояние test (создаётся сам)
+├── docker-compose.yml
+└── Dockerfile
+```
+
+Зависимости Python — **внутри образа**. Папка `venv/` на хосте для Docker не нужна.
+
+---
+
+## 7. Автозапуск systemd (без Docker)
+
+Если не используете Docker — unit для **теста**:
 
 ```bash
 sudo nano /etc/systemd/system/neuro-test.service
 ```
-
-Содержимое (пути подставьте под своего пользователя):
 
 ```ini
 [Unit]
@@ -193,75 +318,112 @@ RestartSec=30
 WantedBy=multi-user.target
 ```
 
-Включить и запустить:
+Для **prod** — файл `neuro-prod.service`, в `ExecStart` замените на:
+
+```
+ExecStart=/home/neurobot/tg_neirocommenting/venv/bin/python prod/neuro_commenter.py
+```
+
+Включение:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable neuro-test
+sudo systemctl enable neuro-test    # или neuro-prod
 sudo systemctl start neuro-test
+sudo journalctl -u neuro-test -f
 ```
 
-Полезные команды:
+### systemd + Docker (альтернатива)
+
+Контейнер с `restart: unless-stopped` в `docker-compose.yml` уже перезапускается сам. Дополнительный systemd не обязателен. Если нужен автозапуск при загрузке сервера:
 
 ```bash
-sudo systemctl status neuro-test      # статус
-sudo journalctl -u neuro-test -f      # логи в реальном времени
-sudo systemctl restart neuro-test     # перезапуск
-sudo systemctl stop neuro-test          # остановка
+sudo nano /etc/systemd/system/neuro-docker-test.service
+```
+
+```ini
+[Unit]
+Description=Neuro test bot (Docker)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=neurobot
+WorkingDirectory=/home/neurobot/tg_neirocommenting
+ExecStart=/usr/bin/docker compose up -d neuro-test
+ExecStop=/usr/bin/docker compose stop neuro-test
+
+[Install]
+WantedBy=multi-user.target
 ```
 
 ---
 
 ## 8. Обновление после `git pull`
 
+### venv
+
 ```bash
 cd ~/tg_neirocommenting
 git pull
 source venv/bin/activate
-pip install -r requirements.txt    # если менялись зависимости
-sudo systemctl restart neuro-test
+pip install -r requirements.txt
+sudo systemctl restart neuro-test    # или neuro-prod
 ```
 
-`.env`, `neuro_session.session` и `test/neuro_state_test.json` git **не трогает** — они останутся на месте.
+### Docker
+
+```bash
+cd ~/tg_neirocommenting
+git pull
+docker compose build
+docker compose up -d neuro-test      # или neuro-prod
+```
+
+`.env`, `neuro_session.session` и state-файлы git **не трогает**.
 
 ---
 
 ## 9. Частые проблемы
 
-### `SessionRevokedError` / просит войти снова
+### `SessionRevokedError` / снова просит код
 
-Сессия сброшена (вход с телефона, второй процесс с той же сессией). Остановите бота везде, заново авторизуйтесь на ПК, скопируйте свежий `neuro_session.session` на сервер.
+Сессия сброшена (вход с телефона, второй процесс с той же сессией). Остановите бота везде, войдите заново (`venv` или `docker compose run --rm -it`).
 
 ### Бот на ПК и на сервере одновременно
 
-Telethon держит одну активную сессию. Запускайте **только в одном месте**.
+Одна сессия — один активный процесс.
+
+### Docker: `env_file .env not found`
+
+Создайте `.env` в корне проекта до `docker compose up`.
 
 ### `OPENROUTER_API_KEY` / ошибки LLM
 
-Проверьте `.env`, баланс на OpenRouter, доступ сервера в интернет.
+Проверьте `.env`, баланс OpenRouter, интернет с сервера.
 
 ### Комментарии не появляются
 
-- аккаунт должен быть участником канала и группы обсуждений;
-- у канала включены комментарии;
-- канал не в заморозке — команда `статус каналов` в личку боту;
-- в логах: `journalctl -u neuro-test -n 100`.
-
-### Кодировка в логах
-
-В systemd обычно всё ок. При ручном запуске в старом терминале возможны кракозябры — на работу бота не влияет.
+- аккаунт в канале и группе обсуждений;
+- комментарии у канала включены;
+- канал не в заморозке (`статус каналов` в личку);
+- логи: `journalctl -u neuro-test -f` или `docker compose logs -f neuro-test`.
 
 ---
 
-## 10. Чеклист перед продакшеном
+## 10. Чеклист
 
-- [ ] `.env` на сервере, права `600`
-- [ ] `neuro_session.session` в **корне** репозитория
-- [ ] `venv` создан, `pip install -r requirements.txt` без ошибок
-- [ ] `test/channels.json` содержит нужные каналы
+- [ ] Репозиторий склонирован в `~/tg_neirocommenting`
+- [ ] `.env` в корне, права `600`
+- [ ] `neuro_session.session` создан (первый вход) или скопирован с ПК
+- [ ] **venv:** `~/tg_neirocommenting/venv/` создан, `pip install -r requirements.txt` OK  
+      **или Docker:** `docker compose build` OK
+- [ ] Запущен **только один** бот: test **или** prod
+- [ ] Бот **не** запущен на ПК с той же сессией
+- [ ] Каналы в нужном `channels.json`
 - [ ] Ваш ID в `ADMIN_USER_IDS`
-- [ ] Бот **не** запущен на ПК
-- [ ] `systemctl status neuro-test` → `active (running)`
 - [ ] В логах нет повторяющихся ошибок API / Telegram
 
 ---
@@ -270,14 +432,22 @@ Telethon держит одну активную сессию. Запускайт
 
 ```
 /home/neurobot/tg_neirocommenting/
-├── .env                          # секреты (с ПК)
-├── neuro_session.session         # сессия TG-аккаунта (с ПК)
-├── venv/                         # виртуальное окружение
-├── test/
-│   ├── neuro_commenter_test.py   # точка входа
+├── .env
+├── neuro_session.session
+├── venv/                         # только для запуска без Docker
+├── Dockerfile
+├── docker-compose.yml
+├── prod/
+│   ├── neuro_commenter.py
 │   ├── channels.json
-│   └── neuro_state_test.json     # создаётся автоматически
-└── ...
+│   └── neuro_state.json
+└── test/
+    ├── neuro_commenter_test.py
+    ├── channels.json
+    └── neuro_state_test.json
 ```
 
-Запуск вручную: `python test/neuro_commenter_test.py` из корня репозитория с активированным `venv`.
+| Способ | Тест | Prod |
+|--------|------|------|
+| venv | `python test/neuro_commenter_test.py` | `python prod/neuro_commenter.py` |
+| Docker | `docker compose up -d neuro-test` | `docker compose up -d neuro-prod` |

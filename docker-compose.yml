@@ -1,0 +1,20 @@
+services:
+  neuro-test:
+    build: .
+    command: python test/neuro_commenter_test.py
+    env_file: .env
+    volumes:
+      - .:/app
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+
+  neuro-prod:
+    build: .
+    command: python prod/neuro_commenter.py
+    env_file: .env
+    volumes:
+      - .:/app
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
