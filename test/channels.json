@@ -1,0 +1,40 @@
+{
+  "channels": {
+    "1": {
+      "channel_link": "https://t.me/neyrocommentimpopolnoy",
+      "group_id": 0,
+      "enabled": true,
+      "freeze_days": 0.003472222222222222,
+      "post_min_age_minutes": 5,
+      "post_activity_window_minutes": 5,
+      "min_comments": 3,
+      "min_subscribers": 0,
+      "posts_scan_limit": 30,
+      "freeze_minutes": 5.0
+    },
+    "2": {
+      "channel_link": "https://t.me/test_neirocoment",
+      "group_id": 0,
+      "enabled": true,
+      "freeze_days": 0.003472222222222222,
+      "post_min_age_minutes": 5,
+      "post_activity_window_minutes": 5,
+      "min_comments": 3,
+      "min_subscribers": 0,
+      "posts_scan_limit": 30,
+      "freeze_minutes": 5.0
+    },
+    "3": {
+      "channel_link": "https://t.me/neirocomentingiruem",
+      "group_id": 4452617314,
+      "enabled": true,
+      "freeze_days": 0.003472222222222222,
+      "post_min_age_minutes": 5,
+      "post_activity_window_minutes": 5,
+      "min_comments": 3,
+      "min_subscribers": 0,
+      "posts_scan_limit": 30,
+      "freeze_minutes": 5
+    }
+  }
+}

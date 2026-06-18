@@ -1,48 +1,38 @@
-"""Настройки нейрокомментинга — меняйте здесь без правки логики."""
+"""Настройки боевого нейрокомментинга."""
 
 import os
-from datetime import timedelta
+from datetime import timedelta, timezone
 from pathlib import Path
 
-# --- OpenRouter ---
+from dotenv import load_dotenv
+
+ROOT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = ROOT_DIR.parent
+
+load_dotenv(PROJECT_ROOT / ".env")
+
 MODEL = "qwen/qwen3.6-flash"
 
-# --- Telegram ---
-# Каналы: channels.json (см. channels_store.py)
-CHANNELS_FILE = Path(__file__).with_name("channels.json")
+CHANNELS_FILE = ROOT_DIR / "channels.json"
 
-# Ручной список, если channels.json пуст (username без @)
 CHANNELS_FALLBACK: list[str] = [
     "test_neirocoment",
     "neyrocommentimpopolnoy",
 ]
 
 # --- Глобальная заморозка (частота комментирования) ---
-# Не чаще одного комментария на канал за этот интервал
 GLOBAL_COOLDOWN = timedelta(days=7)
-# GLOBAL_COOLDOWN = timedelta(minutes=5)  # для тестов
 
 # --- Мониторинг постов ---
-# Интервал между тиками (боевой)
 MONITORING_INTERVAL = timedelta(minutes=30)
-# MONITORING_INTERVAL = timedelta(minutes=1)  # для тестов
 
-# Минимальный возраст поста перед комментарием (не комментируем свежие)
 POST_MIN_AGE = timedelta(minutes=30)
-
-# Окно набора активности: если за это время под постом мало комментариев — пропускаем навсегда
 POST_ACTIVITY_WINDOW = timedelta(minutes=30)
-
-# Минимум чужих комментариев под постом (мы не должны быть первыми)
 MIN_COMMENTS_UNDER_POST = 3
-
-# Сколько последних постов канала просматривать за тик
 POSTS_SCAN_LIMIT = 30
 
-# --- Фильтры канала ---
 MIN_CHANNEL_SUBSCRIBERS = 20_000
 
-# --- Подходящие типы постов (для LLM-классификации) ---
 SUITABLE_POST_TYPES = [
     "Разборы сделок — закрытые плюсовые или минусовые, с цифрами",
     "Обзоры BTC/ETH/альтов с техническим анализом",
@@ -53,7 +43,6 @@ SUITABLE_POST_TYPES = [
     "Вебинары и эфиры — анонсы и записи",
 ]
 
-# --- Неподходящие типы постов ---
 UNSUITABLE_POST_TYPES = [
     "Рекламные посты и партнёрские акции со скидками",
     "Розыгрыши, конкурсы, голосования",
@@ -62,7 +51,6 @@ UNSUITABLE_POST_TYPES = [
     "Посты без аналитики и без торгового/обучающего контекста",
 ]
 
-# --- Правила стиля комментария (генерация) ---
 COMMENT_STYLE_DO = [
     "Писать от первого лица, как живой трейдер",
     "Делиться личным опытом или конкретным наблюдением по теме",
@@ -73,7 +61,7 @@ COMMENT_STYLE_DO = [
 ]
 
 COMMENT_STYLE_DONT = [
-    "Шаблонные фразы: «отличный пост», «согласен», «спасибо»",
+    "Шаблонные фразы: «отличный пост», «согласен», «spasибо»",
     "Рекламировать канал напрямую — ссылка только в профиле",
     "Общие слова без конкретики",
     "Длинные «простыни» текста",
@@ -81,15 +69,22 @@ COMMENT_STYLE_DONT = [
     "AI-маркеры: «таким образом», «при этом», «следует отметить»",
 ]
 
-# Задержка перед отправкой комментария (имитация человека)
-COMMENT_SEND_DELAY = (12, 32)  # секунды, random.uniform
+COMMENT_SEND_DELAY = (12, 32)
 
-# --- Админ (дебаг-команды в личку аккаунта-комментатора) ---
-# Telegram user id создателя — только он может слать команды
 ADMIN_USER_IDS: list[int] = [
     508607571,  # @the_felicitas
 ]
 
-# --- Состояние на диске ---
-STATE_FILE = Path(__file__).with_name("neuro_state.json")
-SESSION_NAME = "neuro_session"
+# Кто получает автоотчёты по умолчанию (остальные — после «старт отправки»)
+INITIAL_NOTIFICATION_SUBSCRIBERS: list[int] = [
+    508607571,
+]
+
+# Ежедневный отчёт разработчику (6:00 МСК). Если задан DAILY_REPORT_INTERVAL — по интервалу.
+MSK = timezone(timedelta(hours=3))
+DAILY_REPORT_ENABLED = True
+DAILY_REPORT_HOUR_MSK = 6
+DAILY_REPORT_INTERVAL: timedelta | None = None
+
+STATE_FILE = ROOT_DIR / "neuro_state.json"
+SESSION_PATH = str(PROJECT_ROOT / "neuro_session")

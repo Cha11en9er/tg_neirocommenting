@@ -149,9 +149,9 @@ activemq-data/
 
 # Telegram session and runtime state
 *.session
+prod/neuro_state.json
+test/neuro_state_test.json
 comment_cooldowns.json
-neuro_state.json
-neuro_state_test.json
 
 # Environments
 .env

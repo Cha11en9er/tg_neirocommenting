@@ -2,10 +2,10 @@
 Тест логики нейрокомментинга без Telegram.
 Проверяет: о чём пост → подходит ли → какой комментарий был бы.
 
-Запуск:
-  python test_comment.py              — примеры из ТЗ
-  python test_comment.py -t "текст"   — свой пост
-  python test_comment.py -i           — ввод текста в консоли (Ctrl+Z Enter на Windows)
+Запуск (из корня репозитория):
+  python test/test_comment.py
+  python test/test_comment.py -t "текст"
+  python test/test_comment.py -i
 """
 from __future__ import annotations
 
@@ -16,13 +16,10 @@ import os
 import re
 import sys
 
-from dotenv import load_dotenv
 from openai import APIStatusError, AsyncOpenAI, RateLimitError
 
 import neuro_config as cfg
 from neuro_prompts import build_classify_system_prompt, build_comment_system_prompt
-
-load_dotenv()
 
 CLASSIFY_SYSTEM = build_classify_system_prompt()
 COMMENT_SYSTEM = build_comment_system_prompt()

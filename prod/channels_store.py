@@ -17,6 +17,10 @@ ADD_CMD_RE = re.compile(
     r"^(?:добавить|add)\s+",
     re.IGNORECASE,
 )
+REMOVE_CMD_RE = re.compile(
+    r"^(?:удаление|удалить|remove)\s+",
+    re.IGNORECASE,
+)
 # ссылка ... - ... id (гибко: «- .», «|», «-»)
 ADD_LINE_RE = re.compile(
     r"^(?P<link>https?://t\.me/\S+|@[\w]+|\w+)\s*"
@@ -27,9 +31,12 @@ ADD_LINE_RE = re.compile(
 
 
 def _defaults() -> dict[str, Any]:
+    freeze_minutes = getattr(cfg, "DEFAULT_FREEZE_MINUTES", None)
+    freeze_days = cfg.GLOBAL_COOLDOWN.total_seconds() / 86400
     return {
         "enabled": True,
-        "freeze_days": cfg.GLOBAL_COOLDOWN.total_seconds() / 86400,
+        "freeze_days": freeze_days,
+        "freeze_minutes": freeze_minutes,
         "post_min_age_minutes": int(cfg.POST_MIN_AGE.total_seconds() // 60),
         "post_activity_window_minutes": int(cfg.POST_ACTIVITY_WINDOW.total_seconds() // 60),
         "min_comments": cfg.MIN_COMMENTS_UNDER_POST,
@@ -45,6 +52,7 @@ class ChannelEntry:
     group_id: int
     enabled: bool = True
     freeze_days: float = 7.0
+    freeze_minutes: float | None = None
     post_min_age_minutes: int = 30
     post_activity_window_minutes: int = 30
     min_comments: int = 3
@@ -57,6 +65,8 @@ class ChannelEntry:
 
     @property
     def freeze_time(self) -> timedelta:
+        if self.freeze_minutes is not None:
+            return timedelta(minutes=self.freeze_minutes)
         return timedelta(days=self.freeze_days)
 
     @property
@@ -68,7 +78,7 @@ class ChannelEntry:
         return timedelta(minutes=self.post_activity_window_minutes)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "channel_link": self.channel_link,
             "group_id": self.group_id,
             "enabled": self.enabled,
@@ -79,6 +89,9 @@ class ChannelEntry:
             "min_subscribers": self.min_subscribers,
             "posts_scan_limit": self.posts_scan_limit,
         }
+        if self.freeze_minutes is not None:
+            data["freeze_minutes"] = self.freeze_minutes
+        return data
 
     @classmethod
     def from_dict(cls, entry_id: str, data: dict[str, Any]) -> ChannelEntry | None:
@@ -87,12 +100,14 @@ class ChannelEntry:
         if not link or group_id is None:
             return None
         defaults = _defaults()
+        fm = data.get("freeze_minutes")
         return cls(
             entry_id=entry_id,
             channel_link=str(link).strip(),
             group_id=int(group_id),
             enabled=bool(data.get("enabled", defaults["enabled"])),
             freeze_days=float(data.get("freeze_days", data.get("freeze_time_days", defaults["freeze_days"]))),
+            freeze_minutes=float(fm) if fm is not None else None,
             post_min_age_minutes=int(data.get("post_min_age_minutes", defaults["post_min_age_minutes"])),
             post_activity_window_minutes=int(
                 data.get("post_activity_window_minutes", defaults["post_activity_window_minutes"])
@@ -198,6 +213,41 @@ def parse_add_channel(text: str) -> tuple[str, int] | None:
     return None
 
 
+def parse_remove_channel(text: str) -> tuple[str, int] | None:
+    """Парсит удаление: «удаление https://t.me/foo - . -3511597340»."""
+    text = (text or "").strip()
+    if not REMOVE_CMD_RE.match(text):
+        return None
+    body = REMOVE_CMD_RE.sub("", text).strip()
+    return parse_add_channel(body)
+
+
+def disable_channel_entry(
+    link: str,
+    group_id: int,
+    *,
+    entries: dict[str, ChannelEntry] | None = None,
+) -> ChannelEntry:
+    store = entries if entries is not None else load_store()
+    link = normalize_link(link)
+    user = username_from_link(link)
+    if not user:
+        raise ValueError("Не удалось распознать ссылку на канал")
+
+    for entry in store.values():
+        if entry.username and entry.username.lower() == user.lower():
+            if group_id and entry.group_id and entry.group_id != group_id:
+                raise ValueError(
+                    f"group_id {group_id} не совпадает с записью "
+                    f"({entry.group_id}) для @{user}"
+                )
+            entry.enabled = False
+            save_store(store)
+            return entry
+
+    raise ValueError(f"Канал @{user} не найден в channels.json")
+
+
 def add_channel_entry(
     link: str,
     group_id: int,
@@ -222,6 +272,7 @@ def add_channel_entry(
         group_id=int(group_id),
         enabled=True,
         freeze_days=float(defaults["freeze_days"]),
+        freeze_minutes=defaults.get("freeze_minutes"),
         post_min_age_minutes=int(defaults["post_min_age_minutes"]),
         post_activity_window_minutes=int(defaults["post_activity_window_minutes"]),
         min_comments=int(defaults["min_comments"]),

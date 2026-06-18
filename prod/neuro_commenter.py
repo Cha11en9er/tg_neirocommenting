@@ -3,34 +3,50 @@ import json
 import os
 import random
 import re
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from dotenv import load_dotenv
-
-load_dotenv()
-
 from openai import APIStatusError, AsyncOpenAI, RateLimitError
 from telethon import TelegramClient, events, utils
-from telethon.tl.functions.channels import GetFullChannelRequest
-from telethon.tl.types import Message
+from telethon.errors import (
+    ChannelPrivateError,
+    ChatWriteForbiddenError,
+    UserBannedInChannelError,
+    UserNotParticipantError,
+)
+from telethon.tl.functions.channels import GetFullChannelRequest, GetParticipantRequest
+from telethon.tl.types import Message, ChannelParticipantBanned
 
 import neuro_config as cfg
 from channels_store import (
     ChannelEntry,
     add_channel_entry,
+    disable_channel_entry,
     load_store,
     parse_add_channel,
+    parse_remove_channel,
 )
-from neuro_admin import AdminCommands, AdminContext, PendingPostInfo, _estimate_ticks
+from neuro_admin import (
+    AdminCommands,
+    AdminContext,
+    PendingPostInfo,
+    _estimate_ticks,
+    _format_freeze,
+    LBL_COMMENTS,
+    LBL_FREEZE,
+    LBL_MODEL,
+    LBL_MONITORING,
+    LBL_POST_AGE,
+)
 from neuro_prompts import build_classify_system_prompt, build_comment_system_prompt
 
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 PHONE = os.getenv("PHONE")
 
-client = TelegramClient(cfg.SESSION_NAME, API_ID, API_HASH)
+client = TelegramClient(cfg.SESSION_PATH, API_ID, API_HASH)
 openai_client = AsyncOpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=os.getenv("OPENROUTER_API_KEY"),
@@ -40,6 +56,18 @@ CLASSIFY_SYSTEM = build_classify_system_prompt()
 COMMENT_SYSTEM = build_comment_system_prompt()
 
 
+def _fix_console_encoding() -> None:
+    if sys.platform != "win32":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure:
+            try:
+                reconfigure(encoding="utf-8")
+            except Exception:
+                pass
+
+
 @dataclass
 class RuntimeMonitor:
     started_at: datetime
@@ -47,6 +75,17 @@ class RuntimeMonitor:
     next_tick_at: datetime | None = None
     tick_count: int = 0
     last_tick_errors: list[str] = field(default_factory=list)
+    channel_load_errors: dict[str, str] = field(default_factory=dict)
+
+
+_channels_lock: asyncio.Lock | None = None
+
+
+def _channels_lock_get() -> asyncio.Lock:
+    global _channels_lock
+    if _channels_lock is None:
+        _channels_lock = asyncio.Lock()
+    return _channels_lock
 
 
 @dataclass
@@ -126,21 +165,31 @@ def load_channel_names() -> list[str]:
 
 
 class NeuroState:
-    """Cooldown по каналам и отклонённые посты (переживает перезапуск)."""
+    """Cooldown, обработанные посты, baseline после заморозки."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
         self.cooldowns: dict[str, str] = {}
         self.rejected_posts: dict[str, list[int]] = {}
         self.commented_posts: dict[str, list[int]] = {}
+        self.last_commented_post_id: dict[str, int] = {}
+        self.skip_below_post_id: dict[str, int] = {}
+        self.unfreeze_at: dict[str, str] = {}
+        self.rejected_since_unfreeze: dict[str, int] = {}
+        self.notification_subscribers: list[int] = []
         self._load()
+
+    def _default_subscribers(self) -> list[int]:
+        return list(getattr(cfg, "INITIAL_NOTIFICATION_SUBSCRIBERS", cfg.ADMIN_USER_IDS[:1]))
 
     def _load(self) -> None:
         if not self.path.exists():
+            self.notification_subscribers = self._default_subscribers()
             return
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
+            self.notification_subscribers = self._default_subscribers()
             return
         self.cooldowns = data.get("cooldowns", {})
         self.rejected_posts = {
@@ -149,6 +198,21 @@ class NeuroState:
         self.commented_posts = {
             k: list(v) for k, v in data.get("commented_posts", {}).items()
         }
+        self.last_commented_post_id = {
+            k: int(v) for k, v in data.get("last_commented_post_id", {}).items()
+        }
+        self.skip_below_post_id = {
+            k: int(v) for k, v in data.get("skip_below_post_id", {}).items()
+        }
+        self.unfreeze_at = data.get("unfreeze_at", {})
+        self.rejected_since_unfreeze = {
+            k: int(v) for k, v in data.get("rejected_since_unfreeze", {}).items()
+        }
+        subs = data.get("notification_subscribers")
+        if subs is None:
+            self.notification_subscribers = self._default_subscribers()
+        else:
+            self.notification_subscribers = [int(x) for x in subs]
 
     def _save(self) -> None:
         self.path.write_text(
@@ -157,6 +221,11 @@ class NeuroState:
                     "cooldowns": self.cooldowns,
                     "rejected_posts": self.rejected_posts,
                     "commented_posts": self.commented_posts,
+                    "last_commented_post_id": self.last_commented_post_id,
+                    "skip_below_post_id": self.skip_below_post_id,
+                    "unfreeze_at": self.unfreeze_at,
+                    "rejected_since_unfreeze": self.rejected_since_unfreeze,
+                    "notification_subscribers": self.notification_subscribers,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -180,8 +249,16 @@ class NeuroState:
             return True, None
         return False, next_allowed
 
+    def start_freeze(self, channel_key: str) -> None:
+        self.cooldowns[channel_key] = _utc_now().isoformat()
+        self._save()
+
     def mark_commented(self, channel_key: str, post_id: int) -> None:
         self.cooldowns[channel_key] = _utc_now().isoformat()
+        self.last_commented_post_id[channel_key] = post_id
+        self.skip_below_post_id.pop(channel_key, None)
+        self.unfreeze_at.pop(channel_key, None)
+        self.rejected_since_unfreeze.pop(channel_key, None)
         ids = self.commented_posts.setdefault(channel_key, [])
         if post_id not in ids:
             ids.append(post_id)
@@ -191,12 +268,54 @@ class NeuroState:
         ids = self.rejected_posts.setdefault(channel_key, [])
         if post_id not in ids:
             ids.append(post_id)
+        skip = self.skip_below_post_id.get(channel_key, 0)
+        if post_id > skip:
+            self.rejected_since_unfreeze[channel_key] = (
+                self.rejected_since_unfreeze.get(channel_key, 0) + 1
+            )
         self._save()
 
     def is_processed(self, channel_key: str, post_id: int) -> bool:
         return post_id in self.rejected_posts.get(
             channel_key, []
         ) or post_id in self.commented_posts.get(channel_key, [])
+
+    def min_post_id(self, channel_key: str) -> int:
+        return self.skip_below_post_id.get(channel_key, 0)
+
+    def add_notification_subscriber(self, user_id: int) -> bool:
+        if user_id in self.notification_subscribers:
+            return False
+        self.notification_subscribers.append(user_id)
+        self._save()
+        return True
+
+    def remove_notification_subscriber(self, user_id: int) -> bool:
+        if user_id not in self.notification_subscribers:
+            return False
+        self.notification_subscribers.remove(user_id)
+        self._save()
+        return True
+
+    async def ensure_unfreeze_baseline(self, channel_key: str, channel: str) -> None:
+        if channel_key not in self.last_commented_post_id:
+            return
+        if channel_key in self.skip_below_post_id:
+            return
+        latest = 0
+        async for msg in client.iter_messages(channel, limit=1):
+            if isinstance(msg, Message):
+                latest = msg.id
+            break
+        if latest:
+            self.skip_below_post_id[channel_key] = latest
+            self.unfreeze_at[channel_key] = _utc_now().isoformat()
+            self.rejected_since_unfreeze[channel_key] = 0
+            self._save()
+            print(
+                f"  ↳ @{channel}: выход из заморозки, "
+                f"мониторинг с поста #{latest + 1}"
+            )
 
 
 state = NeuroState(cfg.STATE_FILE)
@@ -307,6 +426,41 @@ async def send_channel_comment(
     raise last_error
 
 
+async def check_channel_access(ch: ChannelConfig) -> str:
+    try:
+        me = await client.get_me()
+        entity = await client.get_entity(ch.channel)
+        part = await client(GetParticipantRequest(entity, me))
+        if isinstance(part.participant, ChannelParticipantBanned):
+            br = part.participant.banned_rights
+            if br and br.send_messages:
+                return "забанен в канале"
+            return "ограничен в канале"
+        if ch.discussion_id:
+            try:
+                disc = await client.get_entity(ch.discussion_id)
+                dpart = await client(GetParticipantRequest(disc, me))
+                if isinstance(dpart.participant, ChannelParticipantBanned):
+                    br = dpart.participant.banned_rights
+                    if br and br.send_messages:
+                        return "забанен в обсуждении"
+                    return "ограничен в обсуждении"
+            except UserNotParticipantError:
+                return "не в группе обсуждений"
+        return "ok"
+    except UserNotParticipantError:
+        return "не подписан на канал"
+    except UserBannedInChannelError:
+        return "забанен"
+    except ChatWriteForbiddenError:
+        return "нет права писать"
+    except Exception as e:
+        err = str(e).lower()
+        if "ban" in err or "forbidden" in err:
+            return "ограничение доступа"
+        return f"ошибка: {e}"
+
+
 async def scan_pending_posts(ch: ChannelConfig) -> list[PendingPostInfo]:
     """Посты в локальном ожидании (возраст / комментарии), без LLM."""
     key = _channel_key(ch.channel)
@@ -345,6 +499,7 @@ def _admin_commands() -> AdminCommands:
             channel_key=_channel_key,
             load_channels_raw=load_channels_raw,
             scan_pending=scan_pending_posts,
+            check_access=check_channel_access,
             reload_channels=setup_channels,
         )
     )
@@ -362,14 +517,46 @@ async def _reply_chunks(event: events.NewMessage.Event, text: str) -> None:
 async def admin_message_handler(event: events.NewMessage.Event) -> None:
     if not event.is_private:
         return
-    sender_id = event.sender_id
-    if sender_id not in cfg.ADMIN_USER_IDS:
-        return
     if event.out:
         return
 
+    sender_id = event.sender_id
     text = (event.message.message or "").strip()
     if not text:
+        return
+
+    cmd = text.lower()
+    if cmd == "старт отправки":
+        if state.add_notification_subscriber(sender_id):
+            await event.reply("✅ Системные уведомления включены")
+        else:
+            await event.reply("Уведомления уже включены")
+        return
+    if cmd == "стоп отправки":
+        if state.remove_notification_subscriber(sender_id):
+            await event.reply("✅ Системные уведомления отключены")
+        else:
+            await event.reply("Вы не в списке получателей")
+        return
+
+    if sender_id not in cfg.ADMIN_USER_IDS:
+        return
+
+    removed = parse_remove_channel(text)
+    if removed:
+        link, group_id = removed
+        try:
+            entry = disable_channel_entry(link, group_id)
+            await setup_channels()
+            await event.reply(
+                f"✅ Канал #{entry.entry_id} отключён\n"
+                f"• {entry.channel_link}\n"
+                f"• group_id: {entry.group_id}\n"
+                f"Бот больше не мониторит канал. "
+                f"Выйти из канала/чата — вручную."
+            )
+        except ValueError as e:
+            await event.reply(f"❌ {e}")
         return
 
     parsed = parse_add_channel(text)
@@ -377,14 +564,16 @@ async def admin_message_handler(event: events.NewMessage.Event) -> None:
         link, group_id = parsed
         try:
             entry = add_channel_entry(link, group_id)
+            key = _channel_key(entry.username or "")
+            state.start_freeze(key)
             await setup_channels()
-            user = entry.username or link
             await event.reply(
                 f"✅ Канал #{entry.entry_id} добавлен\n"
                 f"• {entry.channel_link}\n"
                 f"• group_id: {entry.group_id}\n"
-                f"• freeze: {entry.freeze_days} д\n"
-                f"Подхватится на следующем тике мониторинга (или уже сейчас)."
+                f"• {LBL_FREEZE} {_format_timedelta(entry.freeze_time)} "
+                f"(стартовала сейчас)\n"
+                f"Мониторинг после заморозки."
             )
         except ValueError as e:
             await event.reply(f"❌ {e}")
@@ -392,11 +581,18 @@ async def admin_message_handler(event: events.NewMessage.Event) -> None:
 
     admin = _admin_commands()
     reply = await admin.handle_async(text)
-    await _reply_chunks(event, reply)
+    if reply:
+        await _reply_chunks(event, reply)
 
 
 async def setup_channels() -> None:
+    async with _channels_lock_get():
+        await _setup_channels_unlocked()
+
+
+async def _setup_channels_unlocked() -> None:
     channels.clear()
+    runtime.channel_load_errors.clear()
     entries = load_store()
     enabled = [e for e in entries.values() if e.enabled]
     if not enabled:
@@ -434,9 +630,10 @@ async def setup_channels() -> None:
             print(
                 f"  • #{entry.entry_id} @{username}: "
                 f"подписчики {sub_info}, беседа {disc}, "
-                f"freeze {entry.freeze_days}д"
+                f"{LBL_FREEZE} {_format_freeze(entry)}"
             )
         except Exception as e:
+            runtime.channel_load_errors[username] = str(e)
             print(f"  ❌ #{entry.entry_id} @{username}: {e}")
 
 
@@ -479,6 +676,7 @@ async def collect_candidates(ch: ChannelConfig) -> list[PostCandidate]:
 
     now = _utc_now()
     max_age = ch.entry.post_activity_window + cfg.MONITORING_INTERVAL * 2
+    min_id = state.min_post_id(_channel_key(ch.channel))
     result: list[PostCandidate] = []
 
     async for msg in client.iter_messages(
@@ -486,6 +684,8 @@ async def collect_candidates(ch: ChannelConfig) -> list[PostCandidate]:
     ):
         if not isinstance(msg, Message):
             continue
+        if min_id and msg.id <= min_id:
+            break
         text = _post_text(msg)
         if not text:
             continue
@@ -519,6 +719,8 @@ async def process_channel(ch: ChannelConfig) -> bool:
             f"осталось {_format_timedelta(left)}"
         )
         return False
+
+    await state.ensure_unfreeze_baseline(key, ch.channel)
 
     if (
         ch.subscribers is not None
@@ -602,6 +804,42 @@ async def monitoring_tick() -> None:
             print(f"❌ {msg}")
 
 
+async def daily_report_loop() -> None:
+    if not cfg.DAILY_REPORT_ENABLED:
+        return
+    interval = getattr(cfg, "DAILY_REPORT_INTERVAL", None)
+    while True:
+        if interval is not None:
+            wait = interval.total_seconds()
+            print(
+                f"\n📋 Следующий отчёт через "
+                f"{_format_timedelta(interval)}"
+            )
+            await asyncio.sleep(wait)
+        else:
+            now_msk = datetime.now(cfg.MSK)
+            target = now_msk.replace(
+                hour=cfg.DAILY_REPORT_HOUR_MSK,
+                minute=0,
+                second=0,
+                microsecond=0,
+            )
+            if now_msk >= target:
+                target += timedelta(days=1)
+            wait = (target - now_msk).total_seconds()
+            await asyncio.sleep(wait)
+        try:
+            async with _channels_lock_get():
+                await _setup_channels_unlocked()
+                admin = _admin_commands()
+                report = await admin.build_daily_report()
+            for uid in state.notification_subscribers:
+                await client.send_message(uid, report)
+            print("📋 Отчёт отправлен")
+        except Exception as e:
+            print(f"❌ Ошибка отчёта: {e}")
+
+
 async def monitoring_loop() -> None:
     while True:
         await monitoring_tick()
@@ -613,17 +851,20 @@ async def monitoring_loop() -> None:
 
 
 async def main() -> None:
+    _fix_console_encoding()
     await client.start(phone=PHONE)
     me = await client.get_me()
     name = f"@{me.username}" if me.username else me.first_name
     print(f"✅ Нейрокомментер запущен! Аккаунт: {name}")
-    print(f"Модель: {cfg.MODEL}")
-    print(f"Глобальная заморозка: {_format_timedelta(cfg.GLOBAL_COOLDOWN)}")
-    print(f"Интервал мониторинга: {_format_timedelta(cfg.MONITORING_INTERVAL)}")
-    print(f"Мин. возраст поста: {_format_timedelta(cfg.POST_MIN_AGE)}")
-    print(f"Мин. комментариев под постом: {cfg.MIN_COMMENTS_UNDER_POST}")
+    print(f"{LBL_MODEL}: {cfg.MODEL}")
+    print(f"{LBL_FREEZE}: {_format_timedelta(cfg.GLOBAL_COOLDOWN)}")
+    print(f"{LBL_MONITORING}: {_format_timedelta(cfg.MONITORING_INTERVAL)}")
+    print(f"{LBL_POST_AGE}: {_format_timedelta(cfg.POST_MIN_AGE)}")
+    print(f"{LBL_COMMENTS}: {cfg.MIN_COMMENTS_UNDER_POST}")
     print(f"Админ-команды в личку: {cfg.ADMIN_USER_IDS}")
-    print("Команды: каналы | статус | статус каналов")
+    print("Команды: настройки | статус | статус каналов | каналы")
+    print("Добавить: https://t.me/channel - . -group_id")
+    print("Удалить: удаление https://t.me/channel - . -group_id")
     await setup_channels()
 
     for ch in channels.values():
@@ -643,10 +884,12 @@ async def main() -> None:
     )
 
     loop_task = asyncio.create_task(monitoring_loop())
+    report_task = asyncio.create_task(daily_report_loop())
     try:
         await client.run_until_disconnected()
     finally:
         loop_task.cancel()
+        report_task.cancel()
 
 
 if __name__ == "__main__":

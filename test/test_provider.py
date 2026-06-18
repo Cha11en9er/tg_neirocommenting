@@ -1,17 +1,15 @@
 """
 Простой тест OpenRouter: один вопрос — один ответ.
-Запуск: python test_provider.py
+Запуск: python test/test_provider.py
 """
 import os
 import sys
 import time
 
-from dotenv import load_dotenv
+import neuro_config as cfg
 from openai import OpenAI, APIStatusError, RateLimitError
 
-load_dotenv()
-
-MODEL = "qwen/qwen3.6-flash"
+MODEL = cfg.MODEL
 QUESTION = "какая погода в Пекине?"
 
 
